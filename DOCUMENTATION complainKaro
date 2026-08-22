@@ -1,0 +1,116 @@
+# complainKARO - Detailed System Documentation
+
+Welcome to the comprehensive documentation for **complainKARO**. This document provides an in-depth look at the internal architecture, API structure, database schemas, and AI integration mechanisms of the system.
+
+---
+
+## 1. System Architecture Overview
+
+complainKARO is a full-stack web application employing a **Client-Server Architecture**.
+
+### 1.1 Frontend (React 19 + Vite + TypeScript)
+The client interface is designed for two primary roles: **Students** and **Wardens**.
+- **State & Data Fetching:** Uses standard React hooks (`useState`, `useEffect`). API requests are handled by a custom `api/client.ts` wrapper utilizing `fetch`.
+- **Audio Capture:** Uses the native `MediaRecorder` API to record `.webm` audio directly from the browser.
+- **Offline Support:** Utilizes a custom `useOfflineQueue` hook and `IndexedDB` to queue complaints if the network is disconnected, syncing them once online.
+- **Real-Time UI:** Leverages WebSockets to listen for `NEW_TICKET`, `TICKET_RESOLVED`, and `TICKET_DELETED` events to update the Warden dashboard without page reloads.
+
+### 1.2 Backend (Node.js + Express + TypeScript)
+A monolithic REST API responsible for all business logic, AI orchestration, and database interactions.
+- **Routing & Controllers:** Organized by resource (`/auth`, `/complaints`, `/tickets`).
+- **Services:** Dedicated modules for specific tasks (`storage.ts`, `transcription.ts`, `classification.ts`, `embedding.ts`, `dedup.ts`).
+- **Database Layer:** Powered by PostgreSQL and managed by Drizzle ORM.
+
+---
+
+## 2. API Documentation
+
+All endpoints are prefixed with `/api`. Most endpoints (except login/register) require a valid JWT token in the `Authorization` header (`Bearer <token>`).
+
+### 2.1 Authentication (`/api/auth`)
+
+| Endpoint | Method | Role | Description | Payload |
+| :--- | :--- | :--- | :--- | :--- |
+| `/login` | `POST` | Any | Authenticates a user and returns a JWT. | `{ email, password }` |
+| `/register` | `POST` | Any | Registers a new student or warden. | `{ name, email, password, role, roomNumber, phone }` |
+
+### 2.2 Complaints (`/api/complaints`)
+
+| Endpoint | Method | Role | Description | Payload (Multipart/form-data) |
+| :--- | :--- | :--- | :--- | :--- |
+| `/` | `POST` | Student | Submits a new voice complaint. Triggers AI triage, deduplication, and saving. | `audio` (File), `browserTranscript` (String, optional) |
+
+### 2.3 Tickets (`/api/tickets`)
+
+| Endpoint | Method | Role | Description | Query / Payload |
+| :--- | :--- | :--- | :--- | :--- |
+| `/` | `GET` | Warden | Fetches paginated list of all tickets. | Query: `?status=open&category=wifi&page=1&limit=50` |
+| `/my` | `GET` | Student | Fetches all tickets submitted by the logged-in student. | *None* |
+| `/:id` | `GET` | Both | Fetches a specific ticket. (Students can only view their own). | *None* |
+| `/:id/status`| `PATCH`| Warden | Updates a ticket's status. | `{ status: 'resolved' \| 'open' \| 'flagged' }` |
+| `/:id` | `DELETE` | Both | Deletes a ticket. | *None* |
+
+---
+
+## 3. Database Schema (Drizzle ORM)
+
+The database consists of two core tables stored in PostgreSQL.
+
+### 3.1 `users` Table
+Stores authentication and profile data.
+- `id` (UUID, Primary Key)
+- `email` (String, Unique)
+- `passwordHash` (String)
+- `role` (Enum: `student`, `warden`)
+- `name`, `roomNumber`, `phone` (Strings)
+
+### 3.2 `tickets` Table
+Stores all complaint data, AI analysis results, and audio references.
+- `id` (UUID, Primary Key)
+- `studentId` (UUID, Foreign Key referencing `users`)
+- `audioUrl` (String, URL from Cloudinary)
+- `transcript` (Text, from WebSpeech or Gemini)
+- `category` (Enum: `wifi`, `electricity`, `water`, `food`, `hygiene`, `security`, `maintenance`, `other`)
+- `urgencyScore` (Integer, 1-5)
+- `status` (Enum: `open`, `duplicate`, `flagged`, `resolved`)
+- `clusterId` (UUID, self-referential Foreign Key for grouping duplicate complaints)
+- `confidenceScore` (Float, Gemini's confidence in its classification)
+
+---
+
+## 4. Artificial Intelligence Integration (Google Gemini)
+
+The system heavily relies on `Google Generative AI` (Gemini API) to automate the triage process. This occurs in three distinct phases during complaint submission:
+
+### 4.1 Transcription (`transcription.ts`)
+If the browser's native `WebSpeech API` fails or returns an empty string (due to background noise or lack of browser support), the backend sends the `.webm` audio file directly to Gemini to generate an accurate transcript in English, Hindi, or Hinglish.
+
+### 4.2 Classification & Triage (`classification.ts`)
+The raw transcript is sent to Gemini with a highly specific Prompt Engineering structure, forcing the AI to return a strict JSON schema containing:
+- The assigned category.
+- A calculated urgency score based on severity (e.g., "no water" = 5, "flickering bulb" = 2).
+- A confidence score.
+
+### 4.3 Deduplication via Embeddings (`embedding.ts` & `dedup.ts`)
+1. The transcript is sent to Gemini's embedding model (`text-embedding-004`) to generate a vector array (a mathematical representation of semantic meaning).
+2. The backend fetches open tickets from the last 24 hours.
+3. A **Cosine Similarity** mathematical algorithm calculates the distance between the new embedding and existing embeddings.
+4. If similarity is > `0.85`, the ticket is flagged as a `duplicate` and attached to the parent ticket's `clusterId`.
+
+---
+
+## 5. Media Handling & Storage
+
+1. Audio is recorded via the browser as `.webm` (Opus codec).
+2. It is uploaded to the Express server using `multer` in memory.
+3. The `storage.ts` service pipes the buffer directly to **Cloudinary**'s secure cloud storage.
+4. Cloudinary returns a public HTTPS URL which is saved in the `tickets` table.
+
+---
+
+## 6. Real-Time Architecture (WebSockets)
+
+To prevent the warden from constantly refreshing the page, a native WebSocket server is attached to the Express HTTP server.
+- The React frontend establishes a `ws://` connection upon loading the Warden Dashboard.
+- When a student successfully posts a complaint, the backend broadcasts a `{ type: 'NEW_TICKET', payload: ticketData }` message to all connected wardens.
+- Status changes and deletions also trigger broadcasts to maintain UI synchronization across multiple devices.
