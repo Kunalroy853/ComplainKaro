@@ -1,0 +1,49 @@
+version: '3.8'
+
+services:
+  # ── 1. PostgreSQL Database with pgvector extension ─────────────────────────
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: complainkaro_db
+    restart: always
+    environment:
+      POSTGRES_DB: vocallabs
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-ComplainKARO2026!}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d vocallabs"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ── 2. Node.js + Express Backend ───────────────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: complainkaro_backend
+    restart: always
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PORT: 4000
+      NODE_ENV: production
+      DATABASE_URL: postgresql://postgres:${DB_PASSWORD:-ComplainKARO2026!}@postgres:5432/vocallabs
+      JWT_SECRET: ${JWT_SECRET:-production_jwt_secret_must_be_at_least_32_chars_long_2026!}
+      FRONTEND_URL: ${FRONTEND_URL:-http://localhost:5173}
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
+      GEMINI_MODEL: gemini-2.0-flash-exp
+      GEMINI_EMBEDDING_MODEL: text-embedding-004
+      CLOUDINARY_CLOUD_NAME: ${CLOUDINARY_CLOUD_NAME}
+      CLOUDINARY_API_KEY: ${CLOUDINARY_API_KEY}
+      CLOUDINARY_API_SECRET: ${CLOUDINARY_API_SECRET}
+    ports:
+      - "4000:4000"
+
+volumes:
+  pgdata:
